@@ -1,0 +1,15 @@
+# 排除临时文件和调试脚本
+tmp/
+debug_*.py
+test_*.py
+probe_*.html
+
+# 排除资源文件和分析产物
+res/
+下载验证码照片/
+
+# 排除缓存和临时文件
+*.pyc
+__pycache__/
+*.log
+*.tmp
