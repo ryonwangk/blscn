@@ -234,7 +234,9 @@ class BLSSessionH2:
         """
         统一的请求方法（兼容 HTTP/1.1 版本的接口）
 
-        根据路径自动选择正确的 HAR header。
+        HTTP/2 模式下：
+        - HAR header 优先
+        - extra 作为补充，但不覆盖 HAR header 中的关键字段
         """
         if path.startswith("http"):
             url = path
@@ -244,35 +246,41 @@ class BLSSessionH2:
         # 计算实际发送的内容
         send_data = data
         if data and isinstance(data, dict):
-            # 将 dict 转换为 URL 编码的字符串
             from urllib.parse import urlencode
             send_data = urlencode(data)
 
-        # 根据路径选择正确的 header
+        # HTTP/2 模式下，先应用 extra（作为基础），再应用 HAR header（覆盖）
+        # 这样 HAR header 始终保持优先
+        base_headers = dict(extra) if extra else {}
+
+        # 根据路径选择正确的 HAR header
         if method == "GET":
             if "GenerateCaptcha" in path:
-                headers = make_headers_get_captcha()
+                har_headers = make_headers_get_captcha()
             else:
-                headers = make_headers_get_register_page()
+                har_headers = make_headers_get_register_page()
         else:
-            headers = {}
+            har_headers = {}
             if "SendRegisterUserVerificationCode" in path:
                 # OTP 发送：参数在 query string 中，无请求体
-                rvt = (extra or {}).get("RequestVerificationToken", "")
-                headers = make_headers_send_otp(rvt)
+                rvt = base_headers.get("RequestVerificationToken", "")
+                har_headers = make_headers_send_otp(rvt)
                 send_data = None  # HAR 中是 content-length: 0
             elif "RegisterUser" in path and "Captcha" not in path:
                 # 注册提交
                 content_length = len(send_data) if send_data else 0
-                headers = make_headers_do_register(content_length)
+                har_headers = make_headers_do_register(content_length)
             elif "SubmitCaptcha" in path:
                 # 验证码提交
                 content_length = len(send_data) if send_data else 0
-                referer = f"{BASE_URL}/CHN/CaptchaPublic/GenerateCaptcha?data=" + (getattr(self, 'iframe_url', '') or "")
-                headers = make_headers_submit_captcha(referer, content_length)
+                iframe_url = getattr(self, 'iframe_url', '') or ""
+                # iframe_url 已经是完整路径: /CHN/CaptchaPublic/GenerateCaptcha?data=...
+                # referer 应该是: BASE_URL + iframe_url
+                referer = BASE_URL + iframe_url
+                har_headers = make_headers_submit_captcha(referer, content_length)
 
-        if extra:
-            headers.update(extra)
+        # HAR header 覆盖 base_headers
+        headers = {**base_headers, **har_headers}
 
         if method == "POST" and send_data and "Content-Type" not in headers:
             headers["Content-Type"] = "application/x-www-form-urlencoded; charset=UTF-8"
