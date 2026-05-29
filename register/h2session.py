@@ -243,51 +243,84 @@ class BLSSessionH2:
         else:
             url = BASE_URL + path
 
-        # 计算实际发送的内容
-        send_data = data
-        if data and isinstance(data, dict):
-            from urllib.parse import urlencode
-            send_data = urlencode(data)
+        # 先编码数据（这样才知道 content-length）
+        encoded_bytes = b""
+        if data:
+            if isinstance(data, dict):
+                from urllib.parse import urlencode
+                encoded_bytes = urlencode(data).encode("utf-8")
+            else:
+                encoded_bytes = data.encode("utf-8") if isinstance(data, str) else data
+        content_length = len(encoded_bytes)
 
         # HTTP/2 模式下，先应用 extra（作为基础），再应用 HAR header（覆盖）
-        # 这样 HAR header 始终保持优先
         base_headers = dict(extra) if extra else {}
 
-        # 根据路径选择正确的 HAR header
+        # 根据路径选择正确的 HAR header（使用正确的 content_length）
+        har_headers = {}
         if method == "GET":
             if "GenerateCaptcha" in path:
                 har_headers = make_headers_get_captcha()
             else:
                 har_headers = make_headers_get_register_page()
         else:
-            har_headers = {}
             if "SendRegisterUserVerificationCode" in path:
                 # OTP 发送：参数在 query string 中，无请求体
                 rvt = base_headers.get("RequestVerificationToken", "")
                 har_headers = make_headers_send_otp(rvt)
-                send_data = None  # HAR 中是 content-length: 0
+                encoded_bytes = b""  # HAR 中是 content-length: 0
+                content_length = 0
             elif "RegisterUser" in path and "Captcha" not in path:
                 # 注册提交
-                content_length = len(send_data) if send_data else 0
                 har_headers = make_headers_do_register(content_length)
             elif "SubmitCaptcha" in path:
                 # 验证码提交
-                content_length = len(send_data) if send_data else 0
                 iframe_url = getattr(self, 'iframe_url', '') or ""
-                # iframe_url 已经是完整路径: /CHN/CaptchaPublic/GenerateCaptcha?data=...
-                # referer 应该是: BASE_URL + iframe_url
                 referer = BASE_URL + iframe_url
                 har_headers = make_headers_submit_captcha(referer, content_length)
 
         # HAR header 覆盖 base_headers
         headers = {**base_headers, **har_headers}
 
-        if method == "POST" and send_data and "Content-Type" not in headers:
+        # DEBUG: 打印 SubmitCaptcha 请求的详细信息
+        if "SubmitCaptcha" in path:
+            print(f"    [DEBUG H2] SubmitCaptcha:")
+            print(f"    [DEBUG H2]   URL: {url}")
+            print(f"    [DEBUG H2]   Content-Length: {content_length}")
+            print(f"    [DEBUG H2]   Referer: {headers.get('referer', 'N/A')[:80]}...")
+
+        # 特殊处理 SubmitCaptcha：直接使用 client.post() 避免 header 处理问题
+        if "SubmitCaptcha" in path and method == "POST":
+            try:
+                # 使用 data 参数而不是 content 参数
+                resp = self.client.post(
+                    url,
+                    headers=headers,
+                    data=encoded_bytes,
+                    timeout=timeout,
+                )
+                raw = resp.content
+                try:
+                    text = gzip.decompress(raw).decode("utf-8", errors="replace")
+                except Exception:
+                    text = raw.decode("utf-8", errors="replace")
+
+                if "SubmitCaptcha" in path:
+                    print(f"    [DEBUG H2]   Direct POST Response Status: {resp.status_code}")
+                    print(f"    [DEBUG H2]   Direct POST Response Headers: {dict(resp.headers)}")
+
+                return resp.status_code, text, dict(resp.headers)
+            except Exception as e:
+                if "SubmitCaptcha" in path:
+                    print(f"    [DEBUG H2]   Direct POST Error: {e}")
+                return 0, str(e), {}
+
+        if method == "POST" and "Content-Type" not in headers:
             headers["Content-Type"] = "application/x-www-form-urlencoded; charset=UTF-8"
 
         kwargs = {"timeout": timeout}
-        if send_data:
-            kwargs["content"] = send_data.encode("utf-8")
+        if encoded_bytes:
+            kwargs["content"] = encoded_bytes
 
         try:
             resp = self.client.request(method, url, headers=headers, **kwargs)
@@ -296,8 +329,15 @@ class BLSSessionH2:
                 text = gzip.decompress(raw).decode("utf-8", errors="replace")
             except Exception:
                 text = raw.decode("utf-8", errors="replace")
+
+            # DEBUG: 打印响应
+            if "SubmitCaptcha" in path:
+                print(f"    [DEBUG H2]   Response Status: {resp.status_code}")
+                print(f"    [DEBUG H2]   Response Headers: {dict(resp.headers)}")
+
             return resp.status_code, text, dict(resp.headers)
         except Exception as e:
+            print(f"    [DEBUG H2]   Error: {e}")
             return 0, str(e), {}
 
 
